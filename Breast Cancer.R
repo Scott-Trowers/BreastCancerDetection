@@ -26,6 +26,8 @@ library(plotly)
 library(mclust)
 library(caret)
 library(car)
+library(e1071)
+library(randomForest)
 theme_set(theme_classic())
 set.seed(5)
   
@@ -298,20 +300,23 @@ bind_rows(
     fill = "Diagnosis") 
         #classes are imbalanced, but relatively evenly split between test and training data
 
-# Train a logistic regression model using elastic net for feature selection
-      #Assumptions: 
+# Logistic regression model using elastic net for feature selection
+      # Effective on linearly seperable data (which we appear to have)
+      # Assumptions: 
         ## Binary classification problem (it is, and we have encoded as 0 and 1)
         ## Independent observations
 nrow(training_data[duplicated(training_data), ]) # No duplicates
         ## Little multicollinearity (we will use elastic net for feature selection)
         ## Linear relationships between feature variables and log-odds of target variable (we will check after the model is trained)
-  ## Define training method
+ 
+  ## Define training method, using 5-fold repeated cross-validation & grid search for hyperparameters
 train_control = trainControl(method="repeatedcv", 
                              number=5,
                              repeats=5,
                              search="grid",
                              classProbs=TRUE,
                              summaryFunction=twoClassSummary)
+  
   ## Define a grid for alpha (the regularisation parameter)
 alpha_grid = expand.grid( 
   alpha = seq(0, 1, by = 0.1),       # 0 = Ridge, 1 = Lasso, in between = Elastic Net
@@ -322,9 +327,9 @@ logistic_model = train(diagnosis~.,
                        data=training_data,
                        method="glmnet",
                        trControl=train_control,
-                       tuneGrid = alpha_grid,
-                       metric = "ROC",
-                       family = "binomial")
+                       tuneGrid=alpha_grid,
+                       metric="ROC",
+                       family="binomial")
 
   ## Evaluate the trained model:
 logistic_model$bestTune 
@@ -338,15 +343,77 @@ ggplot(varImp(logistic_model)) + labs(title = "Feature Importance of Logistic Mo
       # texture_worst, concave.points_worst and radius_worst were the three most importance features
 
 
-
-  #boosted decision tree
-  #random forest
-  #KnearestNeighbours
-  #XGBoost
-  #naive bayes
-  #Neural network
-  #SVM
+#SVM
+#reuse training control
+SVM_grid =  expand.grid(
+  sigma = c(0.01, 0.025, 0.05, 0.1, 0.2),
+  C = c(0.5, 1, 2, 4))
   
+  
+SVM_model = train(diagnosis~.,
+                  data=training_data,
+                  method="svmRadial",
+                  trControl=train_control,
+                  tuneGrid=SVM_grid,
+                  metric="ROC",
+                  )
+SVM_model
+SVM_Predictions = predict(SVM_model, newdata=test_data)
+evaluate_model(SVM_Predictions, test_data$diagnosis, "SVM", "Supervised")
+ggplot(varImp(SVM_model)) + labs(title = "Feature Importance of SVM")
+
+#random forest
+rf_grid = expand.grid(
+  mtry = c(3, 5, 7, 9, 11, 13, 15, 17, 19, 21),
+  min.node.size = c(1, 5, 10),
+  splitrule = c("gini", "extratrees"))
+
+rf_model = train(diagnosis~.,
+                  data=training_data,
+                  method="ranger",
+                  trControl=train_control,
+                  #tuneGrid=rf_grid,
+                  metric="ROC",
+                  importance="permutation"
+                  )
+rf_model
+rf_Predictions = predict(rf_model, newdata=test_data)
+evaluate_model(rf_Predictions, test_data$diagnosis, "randomForest", "Supervised")
+ggplot(varImp(rf_model)) + labs(title = "Feature Importance of randomForest")
+
+#knn
+knn_grid = expand.grid(k = seq(3, 21, by = 2)) #Odd k avoids tie votes
+
+knn_model = train(diagnosis~.,
+                 data=training_data,
+                 method="knn",
+                 trControl=train_control,
+                 tuneGrid=knn_grid,
+                 metric="ROC",
+                 )
+knn_model
+knn_Predictions = predict(knn_model, newdata=test_data)
+evaluate_model(knn_Predictions, test_data$diagnosis, "KNN", "Supervised")
+
+
+
+
+#for each: quick motivation, assumptions, limitations, train, evaluate, feature importance. visualise sensitivity vs specificity and affect of hyperparameter tuning?
+
+# logistic regession
+  # Effective on linearly seperable data (which we appear to have)
+# Random forest
+  # Handles non-linear data well and robust to overfitting
+#SVM
+  # effective in high-dimensional spaces with clear seperation. robust to overfitting
+#KnearestNeighbours (essentially clustering?)
+  # No training required - memorises data and fits new data points to cluster. Doesn't rely on assumptions
+#XGBoost
+  # gradient boosted with regularisation leads to high predictive accuracy. Robust to overfitting
+#naive bayes
+    # efficient to train, works well with high-dimensional data and outlier detection (which is an extreme version of diagnosing)
+#Neural network
+  # models complex non-linear relations, highly flexible and handles large datasets well
 
 
 
