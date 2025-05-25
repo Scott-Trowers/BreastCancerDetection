@@ -5,7 +5,6 @@
 #### Set up ####
 
 # Load required libraries, set default ggplot theme, set seed
-library(tidyverse)
 library(visdat)
 library(ggplot2)
 library(GGally)
@@ -28,8 +27,21 @@ library(caret)
 library(car)
 library(e1071)
 library(randomForest)
+library(xgboost)
+library(klaR)
+library(nnet)
+library(ggbump)
+library(paletteer)
+library(scales)
+library(doParallel)
+library(tidyverse)
+
 theme_set(theme_classic())
 set.seed(5)
+
+# Allow parallel computation, using all but two cores:
+number_cores = detectCores() - 2 
+registerDoParallel(makeCluster(number_cores))
   
 # Load the data
 Raw_Breast_Cancer_Data = read.csv("C:\\Users\\User\\Documents\\Projects\\BreastCancerDetection\\Datasets\\breast+cancer+wisconsin+diagnostic\\data.csv")
@@ -37,8 +49,8 @@ Raw_Breast_Cancer_Data = read.csv("C:\\Users\\User\\Documents\\Projects\\BreastC
 # Create a dataframe to compare models
 Model_Comparisons = 
   data.frame(
-    Model_Name = character(),
-    Model_Type = character(),
+    Model_Name = factor(),
+    Model_Type = factor(),
     Accuracy = numeric(), # Overall prediction accuracy
     Sensitivity = numeric(), # Proportion of true malignant cases that are accurately predicted
     Specificity  = numeric(), # Proportion of true benign cases accurately predicted
@@ -193,6 +205,8 @@ wrap_plots(density_list, ncol=6, nrow=5, guides="collect") +
         ## Dimension reduction may be successful
       # Clear separation in many of the variables between diagnoses, suggesting a classification algorithm will be effective
 
+# Tidy the workspace
+rm(Raw_Breast_Cancer_Data, density_list, histogram_list, i, number_cores, Breast_Cancer_Data.encoded)
 
 #### Unsupervised Learning Exploration, Clustering and Prediction ####
       # High degrees of multicollinearity in the data suggests that dimension reduction may be effective
@@ -230,7 +244,7 @@ table(Actual_Diagnoses, Kmeans_2c$cluster)
       # Only 32.1% of the variability is explained by this model
       # However cluster 1 aligns closely with Malignant diagnoses, and cluster 2 with Benign diagnoses
   ## Rename clusters to relevant diagnosis and calculate metrics
-Kmeans.clusters <- as.factor(ifelse(Kmeans_2c$cluster == 1, "M", "B")) 
+Kmeans.clusters = as.factor(ifelse(Kmeans_2c$cluster == 1, "M", "B")) 
 evaluate_model(Kmeans.clusters, Actual_Diagnoses, model_name = "Kmeans", model_type = "Unsupervised")
       #91.04% overall accuracy, although this may be skewed by the imbalanced Benign class (when Sensitivity is arguable the most metric in this context)
       #82.55% sensitivity and 96.07% specificity, indicating majority of positive cases are predicted, and very few false positives
@@ -244,7 +258,7 @@ fviz_nbclust(Breast_Cancer_Data.scaled, clara, method = "silhouette") + labs(tit
   ## Perform k-medoid clustering and calculate results as before
 Kmedoid = clara(Breast_Cancer_Data.scaled, k=2)
 table(Actual_Diagnoses, Kmedoid$clustering)
-Kmedoid.clusters <- as.factor(ifelse(Kmedoid$clustering == 1, "M", "B")) 
+Kmedoid.clusters = as.factor(ifelse(Kmedoid$clustering == 1, "M", "B")) 
 evaluate_model(Kmedoid.clusters, Actual_Diagnoses, model_name = "Kmedoid", model_type = "Unsupervised")      
       # Specificity is greater than under K-means, but all other metrics are worse!
 
@@ -252,7 +266,7 @@ evaluate_model(Kmedoid.clusters, Actual_Diagnoses, model_name = "Kmedoid", model
   ## Calculate clusters and metrics
 Model_Cluster_2c = Mclust(Breast_Cancer_Data.scaled, G=2)
 table(Actual_Diagnoses, Model_Cluster_2c$classification)
-Model_Cluster_2c.clusters <- as.factor(ifelse(Model_Cluster_2c$classification == 1, "M", "B")) 
+Model_Cluster_2c.clusters = as.factor(ifelse(Model_Cluster_2c$classification == 1, "M", "B")) 
 evaluate_model(Model_Cluster_2c.clusters, Actual_Diagnoses, model_name = "Model_Based (GMM)", model_type = "Unsupervised")
       # Overall accuracy, specificity and balanced accuracy are lower than k-means (86.29%, 84.87%, 86.78% respectively)
       # However sensitivity is higher (88.68% vs 82.55%)
@@ -271,14 +285,21 @@ plot_ly(as.data.frame(PCA$x[,1:3]), type="scatter3d", mode="markers", x=~PC1, y=
 
 # Unsupervised Learning Findings:
 Model_Comparisons[Model_Comparisons$Model_Type == "Unsupervised",]
-      # High proportions of the data can be reduced to 2 or 3 dimensions, aiding visualisation and revealing natural clusters forming within the PCs
+      # High proportions of the data can be reduced to 2 or 3 dimensions, aiding visualisation and revealing natural (linearly separable) clusters forming within the PCs
       # Cluster analysis is able to identify clusters that can be used to predict diagnoses with good accuracy.
       # Model-based clustering has higher sensitivity than K-means clustering, although lower accuracy, balanced accuracy and specificity
 
+# Tidy the workspace
+rm(Kmeans.clusters, Kmedoid.clusters, Model_Cluster_2c.Cluster_Comparison, Model_Cluster_2c.clusters, Breast_Cancer_Data.scaled)
 
 #### Supervised Learning Prediction ####
       # The presence of clear clusters in the data suggests a classification model should be effective
       # Lets prepare the data for modelling, and then train and compare different modelling approaches
+      # General approach will:
+          ## Split the data in training and test datasets
+          ## Use a grid-search and repeated 5 fold cross-validation to evaluate hyperparameters and train the model
+          ## Evaluate optimal model using the test data
+          ## Compare modelling approaches
   
 # Process the data for modelling
   ## 1) Scale the feature variables
@@ -300,38 +321,34 @@ bind_rows(
     fill = "Diagnosis") 
         #classes are imbalanced, but relatively evenly split between test and training data
 
-# Logistic regression model using elastic net for feature selection
-      # Effective on linearly seperable data (which we appear to have)
-      # Assumptions: 
-        ## Binary classification problem (it is, and we have encoded as 0 and 1)
-        ## Independent observations
-nrow(training_data[duplicated(training_data), ]) # No duplicates
-        ## Little multicollinearity (we will use elastic net for feature selection)
-        ## Linear relationships between feature variables and log-odds of target variable (we will check after the model is trained)
- 
-  ## Define training method, using 5-fold repeated cross-validation & grid search for hyperparameters
+# Define training method, using 5-fold repeated cross-validation & grid search for hyperparameters, with parallel computation
 train_control = trainControl(method="repeatedcv", 
                              number=5,
                              repeats=5,
                              search="grid",
                              classProbs=TRUE,
-                             summaryFunction=twoClassSummary)
-  
-  ## Define a grid for alpha (the regularisation parameter)
-alpha_grid = expand.grid( 
-  alpha = seq(0, 1, by = 0.1),       # 0 = Ridge, 1 = Lasso, in between = Elastic Net
-  lambda = seq(0, 1, length = 51))  # strength of the regularisation penalties
+                             summaryFunction=twoClassSummary,
+                             allowParallel = TRUE)
+
+# Logistic regression model using elastic net for feature selection:
+      # Effective on linearly separable data (which we appear to have)
+      # Is computationally inexpensive
+      # However it assumes linear relationships and can be ineffective in the presence of multicollinearity (which is present)
+     
+  ## Define a grid for alpha and lambda (regularisation parameters)
+logistic_grid = expand.grid(alpha = seq(0, 1, by = 0.1),     # 0 = Ridge, 1 = Lasso, in between = Elastic Net
+                            lambda = seq(0, 1, length = 21))  # strength of the regularisation penalties
 
   ## Train the model
 logistic_model = train(diagnosis~.,
                        data=training_data,
                        method="glmnet",
                        trControl=train_control,
-                       tuneGrid=alpha_grid,
+                       tuneGrid=logistic_grid,
                        metric="ROC",
                        family="binomial")
 
-  ## Evaluate the trained model:
+  ## Evaluate the trained model, test against the test_data, and examine feature importance:
 logistic_model$bestTune 
 Logistic_Predictions = predict(logistic_model, newdata=test_data)
 evaluate_model(Logistic_Predictions, test_data$diagnosis, "Logistic Model", "Supervised")
@@ -343,13 +360,15 @@ ggplot(varImp(logistic_model)) + labs(title = "Feature Importance of Logistic Mo
       # texture_worst, concave.points_worst and radius_worst were the three most importance features
 
 
-#SVM
-#reuse training control
-SVM_grid =  expand.grid(
-  sigma = c(0.01, 0.025, 0.05, 0.1, 0.2),
-  C = c(0.5, 1, 2, 4))
-  
-  
+# SVM
+      # Works well in high-dimensional datasets in which classes are separable (which has been confirmed by PCA)
+      # However it it sensitive to hyperparameters and is not robust to overlapping classes
+  ## Calculate values of sigma to test, and create a tuning grid of sigma and C (regularisation term)
+sigma_estimates = kernlab::sigest(diagnosis~., data=training_data)
+SVM_grid =  expand.grid(sigma = sigma_estimates,
+                        C = c(0.1, 0.25, 0.5, 1, 1.5, 2, 4))
+
+  ## Train the model using grid-search
 SVM_model = train(diagnosis~.,
                   data=training_data,
                   method="svmRadial",
@@ -357,32 +376,42 @@ SVM_model = train(diagnosis~.,
                   tuneGrid=SVM_grid,
                   metric="ROC",
                   )
+  ## Evaluate the model training and test metrics, and visualise feature importance
 SVM_model
 SVM_Predictions = predict(SVM_model, newdata=test_data)
 evaluate_model(SVM_Predictions, test_data$diagnosis, "SVM", "Supervised")
 ggplot(varImp(SVM_model)) + labs(title = "Feature Importance of SVM")
 
-#random forest
-rf_grid = expand.grid(
-  mtry = c(3, 5, 7, 9, 11, 13, 15, 17, 19, 21),
-  min.node.size = c(1, 5, 10),
-  splitrule = c("gini", "extratrees"))
+
+# randomForest
+      # Handles non-linear relationships well, is robust to multicollinearity 
+      # Ensemble method which can help resist over-fitting 
+      # However can be computationally intensive, and is less interpretable than other methods
+  ## Define grid and train the model
+rf_grid = expand.grid(mtry = c(3, 5, 7, 9, 11, 13, 15),
+                      min.node.size = c(1, 5, 10, 15, 20),
+                      splitrule = c("gini", "extratrees"))
 
 rf_model = train(diagnosis~.,
                   data=training_data,
                   method="ranger",
                   trControl=train_control,
-                  #tuneGrid=rf_grid,
+                  tuneGrid=rf_grid,
                   metric="ROC",
-                  importance="permutation"
+                  importance="permutation" # Allows feature importance to be visualised
                   )
+  ## Evaluate the model training and test metrics, and visualise feature importance
 rf_model
 rf_Predictions = predict(rf_model, newdata=test_data)
 evaluate_model(rf_Predictions, test_data$diagnosis, "randomForest", "Supervised")
 ggplot(varImp(rf_model)) + labs(title = "Feature Importance of randomForest")
 
-#knn
-knn_grid = expand.grid(k = seq(3, 21, by = 2)) #Odd k avoids tie votes
+
+# K-Nearest Neighbours
+      # Non-parametric, not requiring assumptions about the distribution of data
+      # Doesn't train an actual model, and is sensitive to low-relevance features
+  ## Define hyperparameter grid and train the model
+knn_grid = expand.grid(k = seq(3, 23, by = 4)) #Odd 'k' avoids tie votes
 
 knn_model = train(diagnosis~.,
                  data=training_data,
@@ -391,30 +420,95 @@ knn_model = train(diagnosis~.,
                  tuneGrid=knn_grid,
                  metric="ROC",
                  )
+
+  ## Evaluate the model training and test metrics, and visualise feature importance
 knn_model
 knn_Predictions = predict(knn_model, newdata=test_data)
 evaluate_model(knn_Predictions, test_data$diagnosis, "KNN", "Supervised")
 
 
+# XGBoost
+      # Flexible and often high performance, uses gradient descent to repeatedly tune trees and then ensembles them
+      # Handles multicollinearity and nonlinearity, and uses regularisation to reduce overfitting
+      # However it is computationally expensive and sensitive to hyperparameters
+  
+  ## Due to computational cost of searching over all possible hyperparameters, allow caret to generate a (granular) grid to search:
+XGB_model = train(diagnosis~.,
+                  data = training_data,
+                  method="xgbTree",
+                  trControl = train_control,
+                  tuneLength = 10, # Set a high granularity for the search
+                  metric = "ROC"
+                  )
+
+  ## Evaluate the model training and test metrics, and visualise feature importance
+XGB_model
+XGB_model$bestTune
+XGB_Predictions = predict(XGB_model, newdata=test_data)
+evaluate_model(XGB_Predictions, test_data$diagnosis, "XGBoost", "Supervised")
+ggplot(varImp(XGB_model)) + labs(title = "Feature Importance of XGBoost")
 
 
-#for each: quick motivation, assumptions, limitations, train, evaluate, feature importance. visualise sensitivity vs specificity and affect of hyperparameter tuning?
+# Naive Bayes
+      # Efficient to train, and robust to redundant features
+      # However assumes conditional independent (although can still be effective if violated)
+      # Requires assumption of Gaussian probability distribution
 
-# logistic regession
-  # Effective on linearly seperable data (which we appear to have)
-# Random forest
-  # Handles non-linear data well and robust to overfitting
-#SVM
-  # effective in high-dimensional spaces with clear seperation. robust to overfitting
-#KnearestNeighbours (essentially clustering?)
-  # No training required - memorises data and fits new data points to cluster. Doesn't rely on assumptions
-#XGBoost
-  # gradient boosted with regularisation leads to high predictive accuracy. Robust to overfitting
-#naive bayes
-    # efficient to train, works well with high-dimensional data and outlier detection (which is an extreme version of diagnosing)
-#Neural network
-  # models complex non-linear relations, highly flexible and handles large datasets well
+  ## Define hyperparameter grid and train the model
+NBayes_grid = expand.grid(usekernel = c(TRUE, FALSE),
+                          fL = c(0, 1, 2),
+                          adjust = c(0.5, 1, 1.5, 2)
+                          )
+
+NBayes_model = train(diagnosis~.,
+                     data=training_data,
+                     method="nb",
+                     trControl = train_control,
+                     tuneGrid = NBayes_grid,
+                     metric="ROC")
+
+  ## Evaluate the model training and test metrics, and visualise feature importance
+NBayes_model
+NBayes_Predictions = predict(NBayes_model, newdata=test_data)
+evaluate_model(NBayes_Predictions, test_data$diagnosis, "Naive Bayes", "Supervised")
+ggplot(varImp(NBayes_model)) + labs(title = "Feature Importance of Naive Bayes")
 
 
+# Neural Network
+      # Flexible and effective at capturing complex patterns and non-linear relationships
+      # Can overfit, especially if dataset is not large (which this isn't)
+      # Black-box means minimal intrepretability 
+  
+  ## Define hyperparameter grid and train the model
+neuralnet_grid = expand.grid(size = c(1, 3, 5, 7, 10),
+                             decay = c(0.001, 0.01, 0.1, 0.5, 1)
+                             )
 
-#compare models
+neuralnet = train(diagnosis~.,
+                  data=training_data,
+                  method="nnet",
+                  trControl = train_control,
+                  tuneGrid = neuralnet_grid,
+                  metric="ROC",
+                  trace = FALSE)
+
+  ## Evaluate the model training and test metrics, and visualise feature importance
+neuralnet
+neuralnet_Predictions = predict(neuralnet, newdata=test_data)
+evaluate_model(neuralnet_Predictions, test_data$diagnosis, "Neural Network", "Supervised")
+ggplot(varImp(neuralnet)) + labs(title = "Feature Importance of Neural Network")
+
+
+# Supervised Learning Findings:
+Model_Comparisons[Model_Comparisons$Model_Type == "Supervised",]
+      # Models have been trained using repeated 5-fold cross validation to reduce the risk of overfitting
+      # Hyperparameters have been tuned using grid-search
+      # Models varied significantly in processing time and requirements
+      # However all produced excellent accuracy across both the training and testing data
+      # Models tended to have greater Specificity than Sensitivity - perhaps due to the imbalanced classes
+      # Training new models using re-sampling techniques to balance classes may prove effective
+      
+# Tidy the workspace
+rm(knn_grid, logistic_grid, NBayes_grid, neuralnet_grid, rf_grid, split_index, SVM_grid, train_control, knn_Predictions, NBayes_Predictions, neuralnet_Predictions, rf_Predictions, sigma_estimates, SVM_Predictions, XGB_Predictions)
+
+
