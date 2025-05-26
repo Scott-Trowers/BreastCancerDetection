@@ -35,6 +35,7 @@ library(paletteer)
 library(scales)
 library(doParallel)
 library(pROC)
+library(NeuralNetTools)
 library(tidyverse)
 
 theme_set(theme_classic())
@@ -329,10 +330,10 @@ Model_Cluster_2c.Cluster_Comparison <- ifelse(Actual_Diagnoses == "M" & Model_Cl
                               )
 plot_ly(
   as.data.frame(PCA$x[,1:3]), 
-  x=~PC1, y=~PC2, z=~PC3, 
+  x = ~PC1, y = ~PC2, z = ~PC3, 
   type = "scatter3d", mode = "markers", 
-  color=~Model_Cluster_2c.Cluster_Comparison, size=I(130)) %>% 
-  layout(paper_bgcolor = "#595c61", scene=list(xaxis=list(color="#ffffff"), yaxis=list(color="#ffffff"), zaxis=list(color="white")), legend=list(font=list(color="white")))
+  color = ~Model_Cluster_2c.Cluster_Comparison, size = I(130)) %>% 
+  layout(paper_bgcolor = "#595c61", scene = list(xaxis = list(color = "#ffffff"), yaxis = list(color = "#ffffff"), zaxis = list(color = "white")), legend = list(font = list(color = "white")))
         # Majority of the false positives tend to be outliers in the reduced data space
         # False negatives are much closer to other data points, between the two main clusters
         # However they are largely located close together
@@ -565,7 +566,7 @@ Model_Comparisons[Model_Comparisons$Model_Type == "Supervised",]
       # Training new models using re-sampling techniques to balance classes may prove effective
       
 # Tidy the workspace
-rm(knn_grid, logistic_grid, NBayes_grid, neuralnet_grid, rf_grid, split_index, SVM_grid, train_control, knn_Predictions, NBayes_Predictions, neuralnet_Predictions, rf_Predictions, sigma_estimates, SVM_Predictions, XGB_Predictions)
+rm(knn_grid, logistic_grid, NBayes_grid, neuralnet_grid, rf_grid, SVM_grid, train_control, knn_Predictions, NBayes_Predictions, neuralnet_Predictions, rf_Predictions, sigma_estimates, SVM_Predictions, XGB_Predictions)
 
 
 
@@ -581,16 +582,50 @@ ggparcoord(
   labs(title = "Comparison of Model Performance", y = "Value", x = "Metric", colour = "Model Name") + 
   theme_ipsum() +
   scale_colour_paletteer_d("ggthemes::Classic_10")
+
+# Model Evaluation and Findings:
       # Supervised models generally outperform the unsupervised across all metrics
         ## The exception is specificity, where K-means and K-medoid do perform well
         ## When compared with sensitivity scores, this suggests the clustering models are "over-fitting" to negative cases, likely due to imbalanced classes
         ## Model-based clustering performs the best for sensitivity despite performing worse on every other metric, which follows as model-based clustering can handle minority clusters better
-      # The neural network, randomForest and XGBoost models stand as the best, although all supervised models perform relatively well.
-        ## These models are better equipped to handle non-linear relationships, imbalanced classes and multicollinearity than the other models
       # Except for the model-based clustering, all models perform very well (>= 95%) for specificity, whilst sensitivity is considerably more varied
         ## Again this suggests over-fitting to the majority class.
-        ## While F1-score was used to attempt to address these, additiomal methods such as re-sampling and adjusting misclassification costs may be effective.
+        ## While F1-score was used to attempt to address these, additional methods such as re-sampling and adjusting misclassification costs may be effective.
+      # The neural network, randomForest and XGBoost models stand as the best, although all supervised models perform relatively well.
+        ## These models are better equipped to handle non-linear relationships, imbalanced classes and multicollinearity than the other models
+      # Overall, the neural network stands out as the optimal model, scoring best across all but Specificity (where randomForest is slightly ahead)
 
+# Visualise  predictions
+  ## Extract test_data actuals, and compare to predictions
+Actual_Diagnoses.test <-  test_data$diagnosis
+neuralnet.prediction_status <- case_when(Actual_Diagnoses.test == "M" & neuralnet_Predictions == "M" ~ "True Pos", 
+                                         Actual_Diagnoses.test == "B" & neuralnet_Predictions == "M" ~ "False Pos", 
+                                         Actual_Diagnoses.test == "B" & neuralnet_Predictions == "B" ~ "True Neg", 
+                                         Actual_Diagnoses.test == "M" & neuralnet_Predictions == "B" ~ "False Neg")
 
-# Visualise optimal model predictions
-# Explore feature importance
+  ## Perform PCA on test_data, and visualise prediction status
+test_data.PCA <-  test_data %>% select(-diagnosis) %>% prcomp(scale = TRUE) 
+plot_ly(
+  as.data.frame(test_data.PCA$x[,1:3]), 
+  x = ~PC1, y = ~PC2, z = ~PC3, 
+  type = "scatter3d", mode = "markers", 
+  color = ~neuralnet.prediction_status, size = I(130)) %>% 
+  layout(paper_bgcolor = "#595c61", scene = list(xaxis = list(color = "#ffffff"), yaxis = list(color = "#ffffff"), zaxis = list(color = "white")), legend = list(font = list(color = "white")))
+      # All incorrect predictions are on the border between natural clusters
+
+# Extract and plot feature importance:
+olden(neuralnet$finalModel, bar_plot = FALSE) %>% 
+  rownames_to_column(var = "Feature") %>%
+  mutate(Sign = ifelse(importance >= 0, "Positive", "Negative"),
+         abs_importance = abs(importance)) %>%
+  ggplot(aes(x = reorder(Feature, abs_importance), y = abs_importance, colour = Sign, alpha=abs_importance)) +
+  geom_segment(aes(xend = Feature, y = 0, yend = abs_importance), linewidth = 1) +
+  geom_point(size = 3) +
+  coord_flip() +
+  labs(x = "Feature", y = "Absolute Importance", title = "Neural Network Feature Importance") +
+  guides(alpha = "none") + 
+  scale_colour_manual(values = c("Positive" = "steelblue", "Negative" = "firebrick")) +
+  theme_minimal()
+      # variables relating to shape and size variability are the most important predictors (such as texture_worst, radius_se, symmetry_worst)
+      # This aligns with medical understanding
+      # Several variables have inverse relationships with malignancy, alhough this could be due to multicollinearity & redudancy
