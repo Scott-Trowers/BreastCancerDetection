@@ -51,20 +51,57 @@ Model_Comparisons =
   data.frame(
     Model_Name = factor(),
     Model_Type = factor(),
+    F1_Score = numeric(), #F1 score
     Accuracy = numeric(), # Overall prediction accuracy
     Sensitivity = numeric(), # Proportion of true malignant cases that are accurately predicted
     Specificity  = numeric(), # Proportion of true benign cases accurately predicted
     Balanced_Accuracy = numeric() # Average of sensitivity and specificity
   )
 
-# Define a function to produce a confusion matrix from model predictions and actuals, and extract metrics
+# Define functions:
+  ## To calculate F1 score, which we will use to evaluate models
+F1_score = function(predictions, actuals, positive_class = "M") {
+
+    # Calculate precision and sensitivity from predictions and actuals:
+    precision = posPredValue(predictions, actuals, positive = positive_class)
+    sensitivity = sensitivity(predictions, actuals, positive = positive_class)
+    
+    #Calculate and return F1-Score:
+    F1 = ifelse((precision + sensitivity) == 0, 0, 2 * (precision * sensitivity) / (precision + sensitivity))
+    return(F1)
+  }
+
+  ## To return F1 score usable with caret as the training metric
+F1_score.caret = function(data, lev = NULL, model = NULL) {
+  
+  # Calculate training metrics from predictions and actuals:
+  precision =  round(posPredValue(data$pred, data$obs, positive = lev[1]), 4)
+  sensitivity =  round(sensitivity(data$pred, data$obs, positive = lev[1]), 4)
+  specificity =  round(specificity(data$pred, data$obs, positive = lev[1]), 4)
+  accuracy <-  round(mean(data$pred == data$obs), 4)
+  bal_accuracy <-  round((sensitivity + specificity) / 2, 4)
+  
+  
+  # Calculate F1-score:
+  f1 = round(ifelse((precision + sensitivity) == 0, 0, 2 * (precision * sensitivity) / (precision + sensitivity)), 4)
+  
+  # Return training metrics:
+  c(F1 = f1, Balanced_Accuracy = bal_accuracy, Accuracy = accuracy, Precision = precision, Specificity = specificity, Sensitivity = sensitivity)
+}
+
+  ## To produce a confusion matrix from model predictions and actuals, extract metrics, and attach to the Model_Comparisons if possible
 evaluate_model = function(predictions, actuals, model_name = NA, model_type = NA, positive_class = "M") {
+  
   # Calculate and print confusion matrix
   confusion_matrix = confusionMatrix(predictions, actuals, positive = positive_class)
   print(confusion_matrix)
+  
+  # Calculate F1 score:
+  F1 = F1_score(predictions, actuals, positive_class = positive_class)
+  cat("F1 Score: ", round(F1, 4), "\n")
 
   # If a model_name is provided in the function call:
-  if (!is.na(model_name)) { 
+  if (!is.na(model_name) && exists("Model_Comparisons")) { 
     # Extract metrics
     acc = confusion_matrix$overall[["Accuracy"]]
     bal_acc = confusion_matrix$byClass[["Balanced Accuracy"]]
@@ -75,6 +112,7 @@ evaluate_model = function(predictions, actuals, model_name = NA, model_type = NA
     metrics = data.frame(
       Model_Name = model_name,
       Model_Type = model_type,
+      F1_Score = round(F1, 4),
       Accuracy = round(acc, 4),
       Balanced_Accuracy = round(bal_acc, 4),
       Sensitivity = round(sensitivity, 4),
@@ -82,9 +120,12 @@ evaluate_model = function(predictions, actuals, model_name = NA, model_type = NA
     
     # Append metrics to Model_Comparisons
     Model_Comparisons <<- rbind(Model_Comparisons, metrics)
-    print("Model_Comparisons Updated")
+    print("Model_Comparisons updated")
+  } else {
+    print("!! Model_Comparisons NOT updated !!")
   }
 }
+
 
 
 #### Exploratory Analysis ####
@@ -327,7 +368,8 @@ train_control = trainControl(method="repeatedcv",
                              repeats=5,
                              search="grid",
                              classProbs=TRUE,
-                             summaryFunction=twoClassSummary,
+                             summaryFunction=F1_score.caret,
+                             savePredictions = "final",
                              allowParallel = TRUE)
 
 # Logistic regression model using elastic net for feature selection:
@@ -345,7 +387,7 @@ logistic_model = train(diagnosis~.,
                        method="glmnet",
                        trControl=train_control,
                        tuneGrid=logistic_grid,
-                       metric="ROC",
+                       metric="F1",
                        family="binomial")
 
   ## Evaluate the trained model, test against the test_data, and examine feature importance:
@@ -374,7 +416,7 @@ SVM_model = train(diagnosis~.,
                   method="svmRadial",
                   trControl=train_control,
                   tuneGrid=SVM_grid,
-                  metric="ROC",
+                  metric="F1",
                   )
   ## Evaluate the model training and test metrics, and visualise feature importance
 SVM_model
@@ -397,7 +439,7 @@ rf_model = train(diagnosis~.,
                   method="ranger",
                   trControl=train_control,
                   tuneGrid=rf_grid,
-                  metric="ROC",
+                  metric="F1",
                   importance="permutation" # Allows feature importance to be visualised
                   )
   ## Evaluate the model training and test metrics, and visualise feature importance
@@ -418,7 +460,7 @@ knn_model = train(diagnosis~.,
                  method="knn",
                  trControl=train_control,
                  tuneGrid=knn_grid,
-                 metric="ROC",
+                 metric="F1",
                  )
 
   ## Evaluate the model training and test metrics, and visualise feature importance
@@ -438,7 +480,7 @@ XGB_model = train(diagnosis~.,
                   method="xgbTree",
                   trControl = train_control,
                   tuneLength = 10, # Set a high granularity for the search
-                  metric = "ROC"
+                  metric = "F1"
                   )
 
   ## Evaluate the model training and test metrics, and visualise feature importance
@@ -465,7 +507,7 @@ NBayes_model = train(diagnosis~.,
                      method="nb",
                      trControl = train_control,
                      tuneGrid = NBayes_grid,
-                     metric="ROC")
+                     metric="F1")
 
   ## Evaluate the model training and test metrics, and visualise feature importance
 NBayes_model
@@ -489,7 +531,7 @@ neuralnet = train(diagnosis~.,
                   method="nnet",
                   trControl = train_control,
                   tuneGrid = neuralnet_grid,
-                  metric="ROC",
+                  metric="F1",
                   trace = FALSE)
 
   ## Evaluate the model training and test metrics, and visualise feature importance
@@ -505,6 +547,7 @@ Model_Comparisons[Model_Comparisons$Model_Type == "Supervised",]
       # Hyperparameters have been tuned using grid-search
       # Models varied significantly in processing time and requirements
       # However all produced excellent accuracy across both the training and testing data
+      # Supervised models outperformed unsupervised models almost entirely
       # Models tended to have greater Specificity than Sensitivity - perhaps due to the imbalanced classes
       # Training new models using re-sampling techniques to balance classes may prove effective
       
@@ -512,3 +555,18 @@ Model_Comparisons[Model_Comparisons$Model_Type == "Supervised",]
 rm(knn_grid, logistic_grid, NBayes_grid, neuralnet_grid, rf_grid, split_index, SVM_grid, train_control, knn_Predictions, NBayes_Predictions, neuralnet_Predictions, rf_Predictions, sigma_estimates, SVM_Predictions, XGB_Predictions)
 
 
+
+#### Model Comparison and Findings ####
+
+# Compare all models, plotting the metrics of each:
+Model_Comparisons
+ggparcoord(Model_Comparisons, columns=3:6, groupColumn = "Model_Name", showPoints = TRUE, scale="globalminmax", alphaLines=0.3,
+           mapping = ggplot2::aes(size=4, linewidth=0.8, linetype="dashed")) + 
+  ggplot2::scale_size_identity() + ggplot2::scale_linewidth_identity() + ggplot2::scale_linetype_identity() +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0.75, 1)) +
+  labs(title="Comparison of Model Performance", y="Value", x="Metric", colour="Model Name") + 
+  theme_ipsum() +
+  scale_colour_paletteer_d("ggthemes::Classic_10")
+
+# Visualise optimal model predictions
+# Explore feature importance
