@@ -50,7 +50,6 @@ Model_Comparisons <-
     Model_Name = factor(),
     Model_Type = factor(),
     F1_Score = numeric(), 
-    ROC = numeric(), 
     Accuracy = numeric(), # Overall prediction accuracy
     Balanced_Accuracy = numeric(), # Average of sensitivity and specificity
     Sensitivity = numeric(), # Proportion of true malignant cases that are accurately predicted
@@ -76,16 +75,13 @@ trainingMetrics <- function(data, lev = NULL, model = NULL) {
   Sensitivity <- round(sensitivity(data$pred, data$obs, positive = lev[1]), 4)
   Specificity <- round(specificity(data$pred, data$obs, positive = lev[1]), 4)
   Accuracy <- round(mean(data$pred == data$obs), 4)
-  Balanced_Accuracy <- round((sensitivity + specificity) / 2, 4)
-  ROC <- round(auc(roc(response = data$obs,
-                        predictor = data[[lev[1]]],
-                        levels = rev(lev))), 4)
+  Balanced_Accuracy <- round((Sensitivity + Specificity) / 2, 4)
   
   # Calculate F1-score:
   F1 <- round(ifelse((Precision + Sensitivity) == 0, 0, 2 * (Precision * Sensitivity) / (Precision + Sensitivity)), 4)
   
-  # Return training metrics:
-  c(F1, ROC, Balanced_Accuracy, Accuracy, Specificity, Sensitivity, Precision)
+  # Return training metrics as a named vector:
+  return(c(F1 = F1, Balanced_Accuracy = Balanced_Accuracy, Accuracy = Accuracy, Specificity = Specificity, Sensitivity = Sensitivity, Precision = Precision))
 }
 
   ## To produce a confusion matrix from model predictions and actuals, extract metrics, and attach to the Model_Comparisons if possible
@@ -105,14 +101,12 @@ evaluateModel <- function(predictions, actuals, model_name = NA, model_type = NA
     bal_acc <- confusion_matrix$byClass[["Balanced Accuracy"]]
     sensitivity <- confusion_matrix$byClass[["Sensitivity"]]
     specificity <- confusion_matrix$byClass[["Specificity"]]
-    roc <- confusion_matrix$byClass[["ROC"]]
-    
+
     ## Return metrics as a data frame entry
     metrics <- data.frame(
       Model_Name = model_name,
       Model_Type = model_type,
       F1_Score = round(F1, 4),
-      ROC = round(roc, 4),
       Accuracy = round(acc, 4),
       Balanced_Accuracy = round(bal_acc, 4),
       Sensitivity = round(sensitivity, 4),
@@ -270,7 +264,7 @@ plot_ly(
   as.data.frame(PCA$x[,1:3]), 
   x = ~PC1, y = ~PC2, z = ~PC3, 
   type = "scatter3d", mode = "markers", 
-  color = Actual_Diagnoses, type = "scatter3d", mode = "markers", size = I(130)) %>% 
+  color = Actual_Diagnoses, size = I(130)) %>% 
   layout(paper_bgcolor = "#595c61", 
          scene = list(xaxis = list(color = "#ffffff"), 
                       yaxis = list(color = "#ffffff"), 
@@ -329,9 +323,9 @@ evaluateModel(Model_Cluster_2c.clusters, Actual_Diagnoses, model_name = "Model_B
       # Context makes this arguably the most important metric, with more of actual positives correctly diagnosed
 
   ## Compare and plot model-based cluster's prediction status (e.g. true positive, false positive, etc)
-Model_Cluster_2c.Cluster_Comparison <- ifelse(Actual_Diagnoses == "M" && Model_Cluster_2c.clusters == "M", "True Pos", 
-                            ifelse(Actual_Diagnoses == "B" && Model_Cluster_2c.clusters == "M", "False Pos", 
-                                   ifelse(Actual_Diagnoses == "B" && Model_Cluster_2c.clusters == "B", "True Neg", "False Neg"))
+Model_Cluster_2c.Cluster_Comparison <- ifelse(Actual_Diagnoses == "M" & Model_Cluster_2c.clusters == "M", "True Pos", 
+                            ifelse(Actual_Diagnoses == "B" & Model_Cluster_2c.clusters == "M", "False Pos", 
+                                   ifelse(Actual_Diagnoses == "B" & Model_Cluster_2c.clusters == "B", "True Neg", "False Neg"))
                               )
 plot_ly(
   as.data.frame(PCA$x[,1:3]), 
@@ -580,13 +574,22 @@ rm(knn_grid, logistic_grid, NBayes_grid, neuralnet_grid, rf_grid, split_index, S
 # Compare all models, plotting the metrics of each:
 Model_Comparisons
 ggparcoord(
-  data=Model_Comparisons, columns = 3:6, groupColumn = "Model_Name", showPoints = TRUE, scale="globalminmax", alphaLines = 0.3,
+  data=Model_Comparisons, columns = 3:ncol(Model_Comparisons), groupColumn = "Model_Name", showPoints = TRUE, scale="globalminmax", alphaLines = 0.3,
   mapping = ggplot2::aes(size = 4, linewidth = 0.8, linetype = "dashed")) + 
   ggplot2::scale_size_identity() + ggplot2::scale_linewidth_identity() + ggplot2::scale_linetype_identity() +
   scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0.75, 1)) +
   labs(title = "Comparison of Model Performance", y = "Value", x = "Metric", colour = "Model Name") + 
   theme_ipsum() +
   scale_colour_paletteer_d("ggthemes::Classic_10")
+      # Supervised models generally outperform the unsupervised across all metrics
+        ## The exception is specificity, where K-means and K-medoid do perform well
+        ## When compared with sensitivity scores, this suggests the clustering models are "over-fitting" to negative cases, likely due to imbalanced classes
+        ## Model-based clustering performs the best for sensitivity despite performing worse on every other metric, which follows as model-based clustering can handle minority clusters better
+      # The neural network, randomForest and XGBoost models stand as the best, although all supervised models perform relatively well.
+        ## These models are better equipped to handle non-linear relationships, imbalanced classes and multicollinearity than the other models
+      # Except for the model-based clustering, all models perform very well (>= 95%) for specificity, whilst sensitivity is considerably more varied
+        ## Again this suggests over-fitting to the majority class.
+        ## While F1-score was used to attempt to address these, additiomal methods such as re-sampling and adjusting misclassification costs may be effective.
 
 
 # Visualise optimal model predictions
