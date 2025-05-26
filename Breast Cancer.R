@@ -34,6 +34,7 @@ library(ggbump)
 library(paletteer)
 library(scales)
 library(doParallel)
+library(pROC)
 library(tidyverse)
 
 theme_set(theme_classic())
@@ -42,26 +43,23 @@ set.seed(5)
 # Allow parallel computation, using all but two cores:
 number_cores = detectCores() - 2 
 registerDoParallel(makeCluster(number_cores))
-  
-# Load the data
-Raw_Breast_Cancer_Data = read.csv("C:\\Users\\User\\Documents\\Projects\\BreastCancerDetection\\Datasets\\breast+cancer+wisconsin+diagnostic\\data.csv")
 
 # Create a dataframe to compare models
 Model_Comparisons = 
   data.frame(
     Model_Name = factor(),
     Model_Type = factor(),
-    F1_Score = numeric(), #F1 score
+    F1_Score = numeric(), 
+    ROC = numeric(), 
     Accuracy = numeric(), # Overall prediction accuracy
+    Balanced_Accuracy = numeric(), # Average of sensitivity and specificity
     Sensitivity = numeric(), # Proportion of true malignant cases that are accurately predicted
-    Specificity  = numeric(), # Proportion of true benign cases accurately predicted
-    Balanced_Accuracy = numeric() # Average of sensitivity and specificity
+    Specificity  = numeric() # Proportion of true benign cases accurately predicted
   )
 
 # Define functions:
   ## To calculate F1 score, which we will use to evaluate models
 F1_score = function(predictions, actuals, positive_class = "M") {
-
     # Calculate precision and sensitivity from predictions and actuals:
     precision = posPredValue(predictions, actuals, positive = positive_class)
     sensitivity = sensitivity(predictions, actuals, positive = positive_class)
@@ -71,27 +69,27 @@ F1_score = function(predictions, actuals, positive_class = "M") {
     return(F1)
   }
 
-  ## To return F1 score usable with caret as the training metric
-F1_score.caret = function(data, lev = NULL, model = NULL) {
-  
+  ## To return custom metrics including F1 score, usable with caret as the training metric
+trainingMetrics = function(data, lev = NULL, model = NULL) {
   # Calculate training metrics from predictions and actuals:
   precision =  round(posPredValue(data$pred, data$obs, positive = lev[1]), 4)
   sensitivity =  round(sensitivity(data$pred, data$obs, positive = lev[1]), 4)
   specificity =  round(specificity(data$pred, data$obs, positive = lev[1]), 4)
-  accuracy <-  round(mean(data$pred == data$obs), 4)
-  bal_accuracy <-  round((sensitivity + specificity) / 2, 4)
-  
+  accuracy =  round(mean(data$pred == data$obs), 4)
+  bal_accuracy =  round((sensitivity + specificity) / 2, 4)
+  roc_auc = round(auc(roc(response = data$obs,
+                        predictor = data[[lev[1]]],
+                        levels = rev(lev))), 4)
   
   # Calculate F1-score:
   f1 = round(ifelse((precision + sensitivity) == 0, 0, 2 * (precision * sensitivity) / (precision + sensitivity)), 4)
   
   # Return training metrics:
-  c(F1 = f1, Balanced_Accuracy = bal_accuracy, Accuracy = accuracy, Precision = precision, Specificity = specificity, Sensitivity = sensitivity)
+  c(F1 = f1, ROC=roc_auc, Balanced_Accuracy = bal_accuracy, Accuracy = accuracy, Precision = precision, Specificity = specificity, Sensitivity = sensitivity)
 }
 
   ## To produce a confusion matrix from model predictions and actuals, extract metrics, and attach to the Model_Comparisons if possible
-evaluate_model = function(predictions, actuals, model_name = NA, model_type = NA, positive_class = "M") {
-  
+evaluateModel = function(predictions, actuals, model_name = NA, model_type = NA, positive_class = "M") {
   # Calculate and print confusion matrix
   confusion_matrix = confusionMatrix(predictions, actuals, positive = positive_class)
   print(confusion_matrix)
@@ -102,23 +100,25 @@ evaluate_model = function(predictions, actuals, model_name = NA, model_type = NA
 
   # If a model_name is provided in the function call:
   if (!is.na(model_name) && exists("Model_Comparisons")) { 
-    # Extract metrics
+    ## Extract metrics
     acc = confusion_matrix$overall[["Accuracy"]]
     bal_acc = confusion_matrix$byClass[["Balanced Accuracy"]]
     sensitivity = confusion_matrix$byClass[["Sensitivity"]]
     specificity = confusion_matrix$byClass[["Specificity"]]
+    roc = confusion_matrix$byClass[["ROC"]]
     
-    # Return metrics as a data frame entry
+    ## Return metrics as a data frame entry
     metrics = data.frame(
       Model_Name = model_name,
       Model_Type = model_type,
       F1_Score = round(F1, 4),
+      ROC = round(roc, 4),
       Accuracy = round(acc, 4),
       Balanced_Accuracy = round(bal_acc, 4),
       Sensitivity = round(sensitivity, 4),
       Specificity = round(specificity, 4))
     
-    # Append metrics to Model_Comparisons
+    ## Append metrics to Model_Comparisons
     Model_Comparisons <<- rbind(Model_Comparisons, metrics)
     print("Model_Comparisons updated")
   } else {
@@ -126,6 +126,8 @@ evaluate_model = function(predictions, actuals, model_name = NA, model_type = NA
   }
 }
 
+# Load the data
+Raw_Breast_Cancer_Data = read.csv("C:\\Users\\User\\Documents\\Projects\\BreastCancerDetection\\Datasets\\breast+cancer+wisconsin+diagnostic\\data.csv")
 
 
 #### Exploratory Analysis ####
@@ -158,7 +160,7 @@ Actual_Diagnoses = Breast_Cancer_Data$diagnosis
 ggplot(data=as.data.frame(table(Actual_Diagnoses)), aes(x=Actual_Diagnoses , y=Freq, fill=Actual_Diagnoses)) + 
   geom_bar(stat="identity") +
   geom_text(aes(label=Freq), vjust=2) + 
-  labs(title = "Distribution of Actual Diagnoses'", 
+  labs(title = "Distribution of Actual Diagnoses", 
        x = "Diagnosis",
        y = "Frequency") +
   theme(legend.position = "none")
@@ -286,7 +288,7 @@ table(Actual_Diagnoses, Kmeans_2c$cluster)
       # However cluster 1 aligns closely with Malignant diagnoses, and cluster 2 with Benign diagnoses
   ## Rename clusters to relevant diagnosis and calculate metrics
 Kmeans.clusters = as.factor(ifelse(Kmeans_2c$cluster == 1, "M", "B")) 
-evaluate_model(Kmeans.clusters, Actual_Diagnoses, model_name = "Kmeans", model_type = "Unsupervised")
+evaluateModel(Kmeans.clusters, Actual_Diagnoses, model_name = "Kmeans", model_type = "Unsupervised")
       #91.04% overall accuracy, although this may be skewed by the imbalanced Benign class (when Sensitivity is arguable the most metric in this context)
       #82.55% sensitivity and 96.07% specificity, indicating majority of positive cases are predicted, and very few false positives
       # 89.3% balanced accuracy (combines sensitivity and specificity)
@@ -300,7 +302,7 @@ fviz_nbclust(Breast_Cancer_Data.scaled, clara, method = "silhouette") + labs(tit
 Kmedoid = clara(Breast_Cancer_Data.scaled, k=2)
 table(Actual_Diagnoses, Kmedoid$clustering)
 Kmedoid.clusters = as.factor(ifelse(Kmedoid$clustering == 1, "M", "B")) 
-evaluate_model(Kmedoid.clusters, Actual_Diagnoses, model_name = "Kmedoid", model_type = "Unsupervised")      
+evaluateModel(Kmedoid.clusters, Actual_Diagnoses, model_name = "Kmedoid", model_type = "Unsupervised")      
       # Specificity is greater than under K-means, but all other metrics are worse!
 
 # Model-based (GMM) clustering can provide more flexible clusters
@@ -308,15 +310,15 @@ evaluate_model(Kmedoid.clusters, Actual_Diagnoses, model_name = "Kmedoid", model
 Model_Cluster_2c = Mclust(Breast_Cancer_Data.scaled, G=2)
 table(Actual_Diagnoses, Model_Cluster_2c$classification)
 Model_Cluster_2c.clusters = as.factor(ifelse(Model_Cluster_2c$classification == 1, "M", "B")) 
-evaluate_model(Model_Cluster_2c.clusters, Actual_Diagnoses, model_name = "Model_Based (GMM)", model_type = "Unsupervised")
+evaluateModel(Model_Cluster_2c.clusters, Actual_Diagnoses, model_name = "Model_Based (GMM)", model_type = "Unsupervised")
       # Overall accuracy, specificity and balanced accuracy are lower than k-means (86.29%, 84.87%, 86.78% respectively)
       # However sensitivity is higher (88.68% vs 82.55%)
       # Context makes this arguably the most important metric, with more of actual positives correctly diagnosed
 
   ## Compare and plot model-based cluster's prediction status (e.g. true positive, false positive, etc)
-Model_Cluster_2c.Cluster_Comparison = ifelse(Actual_Diagnoses == "M" & Model_Cluster_2c.clusters == "M", "True Pos", 
-                            ifelse(Actual_Diagnoses == "B" & Model_Cluster_2c.clusters == "M", "False Pos", 
-                                   ifelse(Actual_Diagnoses == "B" & Model_Cluster_2c.clusters == "B", "True Neg", "False Neg"))
+Model_Cluster_2c.Cluster_Comparison = ifelse(Actual_Diagnoses == "M" && Model_Cluster_2c.clusters == "M", "True Pos", 
+                            ifelse(Actual_Diagnoses == "B" && Model_Cluster_2c.clusters == "M", "False Pos", 
+                                   ifelse(Actual_Diagnoses == "B" && Model_Cluster_2c.clusters == "B", "True Neg", "False Neg"))
                               )
 plot_ly(as.data.frame(PCA$x[,1:3]), type="scatter3d", mode="markers", x=~PC1, y=~PC2, z=~PC3, color=~Model_Cluster_2c.Cluster_Comparison, size=I(130)
           ) %>% layout(paper_bgcolor = "#595c61", scene=list(xaxis=list(color="#ffffff"), yaxis=list(color="#ffffff"), zaxis=list(color="white")), legend=list(font=list(color="white")))
@@ -368,7 +370,7 @@ train_control = trainControl(method="repeatedcv",
                              repeats=5,
                              search="grid",
                              classProbs=TRUE,
-                             summaryFunction=F1_score.caret,
+                             summaryFunction=trainingMetrics,
                              savePredictions = "final",
                              allowParallel = TRUE)
 
@@ -393,7 +395,7 @@ logistic_model = train(diagnosis~.,
   ## Evaluate the trained model, test against the test_data, and examine feature importance:
 logistic_model$bestTune 
 Logistic_Predictions = predict(logistic_model, newdata=test_data)
-evaluate_model(Logistic_Predictions, test_data$diagnosis, "Logistic Model", "Supervised")
+evaluateModel(Logistic_Predictions, test_data$diagnosis, "Logistic Model", "Supervised")
 ggplot(varImp(logistic_model)) + labs(title = "Feature Importance of Logistic Model")
       # Optimal model has alpha = 0.1 and lambda = 0.02, indicating the model is closer aligned to Ridge regularisation (and so less feature selection)
       # Model performs better than clustering unsupervised techniques across all key metrics
@@ -421,7 +423,7 @@ SVM_model = train(diagnosis~.,
   ## Evaluate the model training and test metrics, and visualise feature importance
 SVM_model
 SVM_Predictions = predict(SVM_model, newdata=test_data)
-evaluate_model(SVM_Predictions, test_data$diagnosis, "SVM", "Supervised")
+evaluateModel(SVM_Predictions, test_data$diagnosis, "SVM", "Supervised")
 ggplot(varImp(SVM_model)) + labs(title = "Feature Importance of SVM")
 
 
@@ -445,7 +447,7 @@ rf_model = train(diagnosis~.,
   ## Evaluate the model training and test metrics, and visualise feature importance
 rf_model
 rf_Predictions = predict(rf_model, newdata=test_data)
-evaluate_model(rf_Predictions, test_data$diagnosis, "randomForest", "Supervised")
+evaluateModel(rf_Predictions, test_data$diagnosis, "randomForest", "Supervised")
 ggplot(varImp(rf_model)) + labs(title = "Feature Importance of randomForest")
 
 
@@ -466,7 +468,7 @@ knn_model = train(diagnosis~.,
   ## Evaluate the model training and test metrics, and visualise feature importance
 knn_model
 knn_Predictions = predict(knn_model, newdata=test_data)
-evaluate_model(knn_Predictions, test_data$diagnosis, "KNN", "Supervised")
+evaluateModel(knn_Predictions, test_data$diagnosis, "KNN", "Supervised")
 
 
 # XGBoost
@@ -487,7 +489,7 @@ XGB_model = train(diagnosis~.,
 XGB_model
 XGB_model$bestTune
 XGB_Predictions = predict(XGB_model, newdata=test_data)
-evaluate_model(XGB_Predictions, test_data$diagnosis, "XGBoost", "Supervised")
+evaluateModel(XGB_Predictions, test_data$diagnosis, "XGBoost", "Supervised")
 ggplot(varImp(XGB_model)) + labs(title = "Feature Importance of XGBoost")
 
 
@@ -512,7 +514,7 @@ NBayes_model = train(diagnosis~.,
   ## Evaluate the model training and test metrics, and visualise feature importance
 NBayes_model
 NBayes_Predictions = predict(NBayes_model, newdata=test_data)
-evaluate_model(NBayes_Predictions, test_data$diagnosis, "Naive Bayes", "Supervised")
+evaluateModel(NBayes_Predictions, test_data$diagnosis, "Naive Bayes", "Supervised")
 ggplot(varImp(NBayes_model)) + labs(title = "Feature Importance of Naive Bayes")
 
 
@@ -537,7 +539,7 @@ neuralnet = train(diagnosis~.,
   ## Evaluate the model training and test metrics, and visualise feature importance
 neuralnet
 neuralnet_Predictions = predict(neuralnet, newdata=test_data)
-evaluate_model(neuralnet_Predictions, test_data$diagnosis, "Neural Network", "Supervised")
+evaluateModel(neuralnet_Predictions, test_data$diagnosis, "Neural Network", "Supervised")
 ggplot(varImp(neuralnet)) + labs(title = "Feature Importance of Neural Network")
 
 
@@ -567,6 +569,6 @@ ggparcoord(Model_Comparisons, columns=3:6, groupColumn = "Model_Name", showPoint
   labs(title="Comparison of Model Performance", y="Value", x="Metric", colour="Model Name") + 
   theme_ipsum() +
   scale_colour_paletteer_d("ggthemes::Classic_10")
-
+h 
 # Visualise optimal model predictions
 # Explore feature importance
