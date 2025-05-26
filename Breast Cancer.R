@@ -595,13 +595,55 @@ ggparcoord(
         ## These models are better equipped to handle non-linear relationships, imbalanced classes and multicollinearity than the other models
       # Overall, the neural network stands out as the optimal model, scoring best across all but Specificity (where randomForest is slightly ahead)
 
+# Further tune neuralnet, increasing grid granularity
+neuralnet_grid.granular <- expand.grid(size = c(1, 3, 5, 7, 10, 15, 20),
+                              decay = c(0.0001, 0.001, 0.01, 0.1, 0.5, 1, 2, 5, 10)
+)
+
+neuralnet.tuned <- train(diagnosis~.,
+                    data = training_data,
+                    method = "nnet",
+                    trControl = train_control,
+                    tuneGrid = neuralnet_grid,
+                    metric = "F1",
+                    trace = FALSE)
+
+neuralnet.tuned_Predictions <- predict(neuralnet.tuned, newdata = test_data)
+evaluateModel(neuralnet.tuned_Predictions, test_data$diagnosis, "Neural Network (Tuned)", "Supervised")
+
+# Compare to original neural network:
+NeuralNet_Comparison <- 
+  Model_Comparisons %>%
+  filter(Model_Name %in% c("Neural Network", "Neural Network (Tuned)")) %>%
+  pivot_longer(cols = -c(Model_Name,Model_Type),
+               names_to = "Metric",
+               values_to = "Value")
+
+ggplot(NeuralNet_Comparison, aes(x = Metric, y = Value, fill = Model_Name)) +
+    geom_bar(position = "dodge", stat = "identity") +
+  geom_text(aes(label = scales::percent(Value, accuracy = 0.1)),
+              position = position_dodge(width = 0.9),
+              vjust = 1,
+              size = 3) +  
+    coord_cartesian(ylim=c(0.75, 1)) +
+    labs(title = "Model Performance (Zoomed In)",
+         y = "Score",
+         x = "Metric",
+         fill = "Model") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    scale_y_continuous(labels = label_percent(accuracy = 0.1))
+      # Although accuracy and F1-score have not changed, and Specificity has actually worsened,
+        ## The sensitivity (and balanced accuracy) of the model is now better
+      # In the diagnostic context, this is optimal.
+      # Therefore the final model has a Sensitivity of 98.4%, and an an overall accuracy of 97.6%!
+
 # Visualise  predictions
   ## Extract test_data actuals, and compare to predictions
 Actual_Diagnoses.test <-  test_data$diagnosis
-neuralnet.prediction_status <- case_when(Actual_Diagnoses.test == "M" & neuralnet_Predictions == "M" ~ "True Pos", 
-                                         Actual_Diagnoses.test == "B" & neuralnet_Predictions == "M" ~ "False Pos", 
-                                         Actual_Diagnoses.test == "B" & neuralnet_Predictions == "B" ~ "True Neg", 
-                                         Actual_Diagnoses.test == "M" & neuralnet_Predictions == "B" ~ "False Neg")
+neuralnet.tuned_predictionStatus <- case_when(Actual_Diagnoses.test == "M" & neuralnet.tuned_Predictions == "M" ~ "True Pos", 
+                                         Actual_Diagnoses.test == "B" & neuralnet.tuned_Predictions == "M" ~ "False Pos", 
+                                         Actual_Diagnoses.test == "B" & neuralnet.tuned_Predictions == "B" ~ "True Neg", 
+                                         Actual_Diagnoses.test == "M" & neuralnet.tuned_Predictions == "B" ~ "False Neg")
 
   ## Perform PCA on test_data, and visualise prediction status
 test_data.PCA <-  test_data %>% select(-diagnosis) %>% prcomp(scale = TRUE) 
@@ -609,9 +651,10 @@ plot_ly(
   as.data.frame(test_data.PCA$x[,1:3]), 
   x = ~PC1, y = ~PC2, z = ~PC3, 
   type = "scatter3d", mode = "markers", 
-  color = ~neuralnet.prediction_status, size = I(130)) %>% 
+  color = ~neuralnet.tuned_predictionStatus, size = I(130)) %>% 
   layout(paper_bgcolor = "#595c61", scene = list(xaxis = list(color = "#ffffff"), yaxis = list(color = "#ffffff"), zaxis = list(color = "white")), legend = list(font = list(color = "white")))
       # All incorrect predictions are on the border between natural clusters
+      # Infact, all 3 False Positives are located very close together in the reduced data space
 
 # Extract and plot feature importance:
 olden(neuralnet$finalModel, bar_plot = FALSE) %>% 
@@ -628,4 +671,7 @@ olden(neuralnet$finalModel, bar_plot = FALSE) %>%
   theme_minimal()
       # variables relating to shape and size variability are the most important predictors (such as texture_worst, radius_se, symmetry_worst)
       # This aligns with medical understanding
-      # Several variables have inverse relationships with malignancy, alhough this could be due to multicollinearity & redudancy
+      # Several variables have inverse relationships with malignancy, although this could be due to multicollinearity & redundant columns
+
+finalModel_Comparisons = Model_Comparisons
+save(neuralnet.tuned, finalModel_Comparisons, file="breastCancer_neuralNet_finalModel_ST.Rda")
